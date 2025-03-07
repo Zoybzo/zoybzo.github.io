@@ -1,7 +1,10 @@
 ---
 share: "true"
+data: 2025-03-07
 tags:
   - 🤔
+title: HunyuanVideo-- A Systematic Framework For Large Video Generative Models
+slug: 22:30
 ---
 
 
