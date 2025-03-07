@@ -1,0 +1,4 @@
+baseURL = 'https://zoybzo.github.io/'
+languageCode = 'en-us'
+title = "Zoybzo's Site"
+theme = "papermod"
