@@ -15,20 +15,20 @@ dir: papers
 - HunyuanVideo 是一款开源的视频生成基座模型，打破了目前的开源模型远远弱于闭源模型的情形。
 - Hunyuan 在论文中提出了多种模型，包括文生视频、视频生音频、图生视频，以及姿态控制、音频控制、表情控制等多种下游微调任务。
 - 完整的 pipeline 如下所示： 
-![656x250](Pasted%20image%2020250307161744.png)
+{{< figure src="/images/Pasted image 20250307161744.png" {{if 656x250}}caption="656x250"{{end}} {{if }}width="" height="$5"{{end}} >}}
 - 在 Pipeline 中主要包含三个部分：数据处理、基座模型训练以及下游任务。
 ## Detail
 ### `T2V` 模型
 #### `3D VAE` 
 - 与以往的视频生成模型不同，Hunyuan 选择自己从头训练一个 `3D VAE` 模型。从实验上来看，Hunyuan 的 `3D VAE` 有更高的 PSNR，也就是有更好的重构效果。
 - 模型的 PSNR 实验效果如下：
-![image-2.png](image-2.png)
+{{< figure src="/images/image-2.png" {{if }}caption=""{{end}} {{if }}width="" height="$5"{{end}} >}}
 - `3DVAE` 的模型结构如下：
-![image.png](image.png)
+{{< figure src="/images/image.png" {{if }}caption=""{{end}} {{if }}width="" height="$5"{{end}} >}}
 ##### 训练
 - 训练数据采用 `视频：图片=4:1` 比例。
 - 使用多种损失共同构成损失函数：L1损失+KL损失+LPIPS损失+GAN损失。全都是和图片重构相关的损失函数。
-![image-1.png](image-1.png)
+{{< figure src="/images/image-1.png" {{if }}caption=""{{end}} {{if }}width="" height="$5"{{end}} >}}
 - 训练策略上，采取了渐进式训练策略，从低分辨率短视频逐渐过渡到高分辨率长视频。
 - 为了提升模型对于高速视频的重建能力，会从 `[1,8]` 中随机采样一个数字作为采样间隔，使用该采样间隔从视频帧中进行均匀采样，采样结果用于训练。
 	- 这样的帧率应该就不一样了呀？ #🤔
@@ -87,9 +87,9 @@ def temporal_tiled_encode(self, x: torch.FloatTensor,
 #### Trm Block
 - Trm 使用 unified Full Attention 机制，不再将 spatial 和 temporal 分开计算。（像 CogVideoX 一样）
 - Trm 结构如下：
-![image-3.png](image-3.png)
+{{< figure src="/images/image-3.png" {{if }}caption=""{{end}} {{if }}width="" height="$5"{{end}} >}}
 - Trm 部分的超参数如下：
-![image-4.png](image-4.png)
+{{< figure src="/images/image-4.png" {{if }}caption=""{{end}} {{if }}width="" height="$5"{{end}} >}}
 ##### 输入处理
 - 对于视频，使用 `3DVAE` 转换成 Latents
 - 对于文本，首先使用 LLM（代码中使用的是Llama3）编码成 Embedding，捕获**精细的语义信息**，同时使用 CLIP 提取池化的文本表示，包含**全局信息**。
@@ -105,7 +105,7 @@ def temporal_tiled_encode(self, x: torch.FloatTensor,
 	- 相比于 CLIP，MLLM 在图片细节理解和复杂推理上更强；
 	- MLLM可以遵循 prompt 去编码文本，将注意力更多地放在关键信息上。
 - MLLM 基于因果注意，而 T5-XXL 则利用双向注意，**双向注意可以为扩散模型提供更好的文本指导**，因此使用 Refineer 增强 MLLM 输出的文本特征。
-![image-5.png](image-5.png)
+{{< figure src="/images/image-5.png" {{if }}caption=""{{end}} {{if }}width="" height="$5"{{end}} >}}
 - CLIP 提供的全局信息同样非常重要。类似于Flux和SDv3，通过 scale/shift/gate 的方式将 CLIP 的全局信息添加到模型中。
 #### Scaling Law
 
