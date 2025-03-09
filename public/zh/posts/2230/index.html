@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh" dir="auto">
+
+<head><script src="/livereload.js?mindelay=10&amp;v=2&amp;port=1313&amp;path=livereload" data-no-instant defer></script><meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<meta name="robots" content="noindex, nofollow">
+<title>HunyuanVideo-- A Systematic Framework For Large Video Generative Models | Zoybzo&#39;s Site</title>
+<meta name="keywords" content="🤔">
+<meta name="description" content="Paper
+Overview
+
+HunyuanVideo 是一款开源的视频生成基座模型，打破了目前的开源模型远远弱于闭源模型的情形。
+Hunyuan 在论文中提出了多种模型，包括文生视频、视频生音频、图生视频，以及姿态控制、音频控制、表情控制等多种下游微调任务。
+完整的 pipeline 如下所示：
+
+     
+
+
+在 Pipeline 中主要包含三个部分：数据处理、基座模型训练以及下游任务。
+
+Detail
+T2V 模型
+3D VAE
+
+与以往的视频生成模型不同，Hunyuan 选择自己从头训练一个 3D VAE 模型。从实验上来看，Hunyuan 的 3D VAE 有更高的 PSNR，也就是有更好的重构效果。
+模型的 PSNR 实验效果如下：
+
+3DVAE 的模型结构如下：
+
+
+训练
+
+训练数据采用 视频：图片=4:1 比例。
+使用多种损失共同构成损失函数：L1损失&#43;KL损失&#43;LPIPS损失&#43;GAN损失。全都是和图片重构相关的损失函数。
+
+训练策略上，采取了渐进式训练策略，从低分辨率短视频逐渐过渡到高分辨率长视频。
+为了提升模型对于高速视频的重建能力，会从 [1,8] 中随机采样一个数字作为采样间隔，使用该采样间隔从视频帧中进行均匀采样，采样结果用于训练。
+
+这样的帧率应该就不一样了呀？ #🤔
+通过 Mask 来实现输入帧率不变但实际帧率变化？
+
+
+
+推理
+
+高分辨率长视频的推理往往难以在单张GPU上完成，为了解决这个问题，论文提出了时空瓦片策略（spatial-temporal tiling strategy）（很形象的名字，视频首尾相连，类似于房顶的瓦片），将视频拆成有部分重叠的片段，对每个片段单独编解码，并使用线性组合处理重叠部分。
+直接在推理中使用瓦片策略会导致训练和推理中出现不一致的情况（重叠部分的处理导致的），为了解决这个问题，论文在训练之后引入了一个微调阶段，在微调阶段中随机决定是否采用瓦片策略，保证训练和推理的一致性。
+按照 T 维度（temporal）进行操作的代码如下：
+
+def temporal_tiled_encode(self, x: torch.FloatTensor,  
+                          return_dict: bool = True) -&gt; AutoencoderKLOutput:  
+  
+    B, C, T, H, W = x.shape  
+    # 减去重叠部分后的长度，用作步长  
+    overlap_size = int(  
+        self.tile_sample_min_tsize * (1 - self.tile_overlap_factor))  
+    # 前后帧的重叠长度  
+    blend_extent = int(  
+        self.tile_latent_min_tsize * self.tile_overlap_factor)  
+    # 最大长度  
+    t_limit = self.tile_latent_min_tsize - blend_extent  
+  
+    # Split the video into tiles and encode them separately.  
+    row = []  
+    for i in range(0, T, overlap_size):  
+        # 每一个瓦片的长度为 tile_sample_min_tsize        tile = x[:, :, i: i &#43; self.tile_sample_min_tsize &#43; 1, :, :]  
+        # 处理空间维度  
+        if self.use_spatial_tiling \  
+                and (tile.shape[-1] &gt; self.tile_sample_min_size \  
+                     or tile.shape[-2] &gt; self.tile_sample_min_size):  
+            tile = self.spatial_tiled_encode(tile, return_moments=True)  
+        else:
+            tile = self.encoder(tile)  
+            tile = self.quant_conv(tile)  
+        if i &gt; 0:  
+            tile = tile[:, :, 1:, :, :]  
+        row.append(tile)  
+    result_row = []  
+    for i, tile in enumerate(row):  
+        if i &gt; 0:  
+            # 线性组合当前帧与前一帧的重叠部分  
+            tile = self.blend_t(row[i - 1], tile, blend_extent)  
+            result_row.append(tile[:, :, :t_limit, :, :])  
+        else:  
+            # 第一帧正常返回  
+            result_row.append(tile[:, :, :t_limit &#43; 1, :, :])  
+  
+    moments = torch.cat(result_row, dim=2)  
+    posterior = DiagonalGaussianDistribution(moments)  
+  
+    if not return_dict:  
+        return (posterior,)  
+  
+    return AutoencoderKLOutput(latent_dist=posterior)
+Trm Block
+
+Trm 使用 unified Full Attention 机制，不再将 spatial 和 temporal 分开计算。（像 CogVideoX 一样）
+Trm 结构如下：
+
+Trm 部分的超参数如下：
+
+
+输入处理
+
+对于视频，使用 3DVAE 转换成 Latents
+对于文本，首先使用 LLM（代码中使用的是Llama3）编码成 Embedding，捕获精细的语义信息，同时使用 CLIP 提取池化的文本表示，包含全局信息。
+
+主要结构
+
+主要结构采用了从 Dual-Stream DiT 到 Single-Stream DiT 的设计。（类似于 Flux）
+代码中实际上用的就是 Flux.1 中的 Double 和 Single 网络
+
+位置编码
+
+将 RoPE 扩展到了三维，具体来说是先分别计算 T、H、W 三个维度的旋转频率矩阵，之后将 C 划分成三部分 (dt, dh, dw)，将每一段乘以对应的频率，并将结果 concat，得到最终的 RoPE
+
+如何划分的呢？
+
+
+
+Text Encoder
+
+使用 MLLM 代替 CLIP/T5 作为文本编码器。
+
+相比于 T5，MLLM 在特征空间有更好的图文对齐；
+相比于 CLIP，MLLM 在图片细节理解和复杂推理上更强；
+MLLM可以遵循 prompt 去编码文本，将注意力更多地放在关键信息上。
+
+
+MLLM 基于因果注意，而 T5-XXL 则利用双向注意，双向注意可以为扩散模型提供更好的文本指导，因此使用 Refineer 增强 MLLM 输出的文本特征。
+
+CLIP 提供的全局信息同样非常重要。类似于Flux和SDv3，通过 scale/shift/gate 的方式将 CLIP 的全局信息添加到模型中。
+
+Scaling Law
+模型预训练
+模型加速
+模型性能评估
+V2A 模型
+I2V 模型
+人像动画生成">
+<meta name="author" content="">
+<link rel="canonical" href="http://localhost:1313/zh/posts/2230/">
+<link crossorigin="anonymous" href="/assets/css/stylesheet.45e028aa8ce0961349adf411b013ee39406be2c0bc80d4ea3fc04555f7f4611a.css" integrity="sha256-ReAoqozglhNJrfQRsBPuOUBr4sC8gNTqP8BFVff0YRo=" rel="preload stylesheet" as="style">
+<link rel="icon" href="http://localhost:1313/favicon.ico">
+<link rel="icon" type="image/png" sizes="16x16" href="http://localhost:1313/favicon-16x16.png">
+<link rel="icon" type="image/png" sizes="32x32" href="http://localhost:1313/favicon-32x32.png">
+<link rel="apple-touch-icon" href="http://localhost:1313/apple-touch-icon.png">
+<link rel="mask-icon" href="http://localhost:1313/safari-pinned-tab.svg">
+<meta name="theme-color" content="#2e2e33">
+<meta name="msapplication-TileColor" content="#2e2e33">
+<link rel="alternate" hreflang="zh" href="http://localhost:1313/zh/posts/2230/">
+<noscript>
+    <style>
+        #theme-toggle,
+        .top-link {
+            display: none;
+        }
+
+    </style>
+    <style>
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --theme: rgb(29, 30, 32);
+                --entry: rgb(46, 46, 51);
+                --primary: rgb(218, 218, 219);
+                --secondary: rgb(155, 156, 157);
+                --tertiary: rgb(65, 66, 68);
+                --content: rgb(196, 196, 197);
+                --code-block-bg: rgb(46, 46, 51);
+                --code-bg: rgb(55, 56, 62);
+                --border: rgb(51, 51, 51);
+            }
+
+            .list {
+                background: var(--theme);
+            }
+
+            .list:not(.dark)::-webkit-scrollbar-track {
+                background: 0 0;
+            }
+
+            .list:not(.dark)::-webkit-scrollbar-thumb {
+                border-color: var(--theme);
+            }
+        }
+
+    </style>
+</noscript>
+</head>
+
+<body class="" id="top">
+<script>
+    if (localStorage.getItem("pref-theme") === "dark") {
+        document.body.classList.add('dark');
+    } else if (localStorage.getItem("pref-theme") === "light") {
+        document.body.classList.remove('dark')
+    } else if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        document.body.classList.add('dark');
+    }
+
+</script>
+
+<header class="header">
+    <nav class="nav">
+        <div class="logo">
+            <a href="http://localhost:1313/zh/" accesskey="h" title="Zoybzo&#39;s Site (Alt + H)">Zoybzo&#39;s Site</a>
+            <div class="logo-switches">
+                <button id="theme-toggle" accesskey="t" title="(Alt + T)" aria-label="Toggle theme">
+                    <svg id="moon" xmlns="http://www.w3.org/2000/svg" width="24" height="18" viewBox="0 0 24 24"
+                        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+                    </svg>
+                    <svg id="sun" xmlns="http://www.w3.org/2000/svg" width="24" height="18" viewBox="0 0 24 24"
+                        fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                        stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="5"></circle>
+                        <line x1="12" y1="1" x2="12" y2="3"></line>
+                        <line x1="12" y1="21" x2="12" y2="23"></line>
+                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                        <line x1="1" y1="12" x2="3" y2="12"></line>
+                        <line x1="21" y1="12" x2="23" y2="12"></line>
+                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+                    </svg>
+                </button>
+                <ul class="lang-switch"><li>|</li>
+                    <li>
+                        <a href="http://localhost:1313/en/" title="En"
+                            aria-label="En">En</a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+        <ul id="menu">
+        </ul>
+    </nav>
+</header>
+<main class="main">
+
+<article class="post-single">
+  <header class="post-header">
+    
+    <h1 class="post-title entry-hint-parent">
+      HunyuanVideo-- A Systematic Framework For Large Video Generative Models
+    </h1>
+    <div class="post-meta">
+
+</div>
+  </header> 
+  <div class="post-content"><h1 id="paper">Paper<a hidden class="anchor" aria-hidden="true" href="#paper">#</a></h1>
+<h2 id="overview">Overview<a hidden class="anchor" aria-hidden="true" href="#overview">#</a></h2>
+<ul>
+<li>HunyuanVideo 是一款开源的视频生成基座模型，打破了目前的开源模型远远弱于闭源模型的情形。</li>
+<li>Hunyuan 在论文中提出了多种模型，包括文生视频、视频生音频、图生视频，以及姿态控制、音频控制、表情控制等多种下游微调任务。</li>
+<li>完整的 pipeline 如下所示：
+<figure>
+    <img loading="lazy" src="/images/Pasted%20image%2020250307161744.png" width="656" height="250"/> 
+</figure>
+</li>
+<li>在 Pipeline 中主要包含三个部分：数据处理、基座模型训练以及下游任务。</li>
+</ul>
+<h2 id="detail">Detail<a hidden class="anchor" aria-hidden="true" href="#detail">#</a></h2>
+<h3 id="t2v-模型"><code>T2V</code> 模型<a hidden class="anchor" aria-hidden="true" href="#t2v-模型">#</a></h3>
+<h4 id="3d-vae"><code>3D VAE</code><a hidden class="anchor" aria-hidden="true" href="#3d-vae">#</a></h4>
+<ul>
+<li>与以往的视频生成模型不同，Hunyuan 选择自己从头训练一个 <code>3D VAE</code> 模型。从实验上来看，Hunyuan 的 <code>3D VAE</code> 有更高的 PSNR，也就是有更好的重构效果。</li>
+<li>模型的 PSNR 实验效果如下：
+<img alt="image-2.png" loading="lazy" src="image-2.png"></li>
+<li><code>3DVAE</code> 的模型结构如下：
+<img alt="image.png" loading="lazy" src="image.png"></li>
+</ul>
+<h5 id="训练">训练<a hidden class="anchor" aria-hidden="true" href="#训练">#</a></h5>
+<ul>
+<li>训练数据采用 <code>视频：图片=4:1</code> 比例。</li>
+<li>使用多种损失共同构成损失函数：L1损失+KL损失+LPIPS损失+GAN损失。全都是和图片重构相关的损失函数。
+<img alt="image-1.png" loading="lazy" src="image-1.png"></li>
+<li>训练策略上，采取了渐进式训练策略，从低分辨率短视频逐渐过渡到高分辨率长视频。</li>
+<li>为了提升模型对于高速视频的重建能力，会从 <code>[1,8]</code> 中随机采样一个数字作为采样间隔，使用该采样间隔从视频帧中进行均匀采样，采样结果用于训练。
+<ul>
+<li>这样的帧率应该就不一样了呀？ #🤔</li>
+<li>通过 Mask 来实现输入帧率不变但实际帧率变化？</li>
+</ul>
+</li>
+</ul>
+<h5 id="推理">推理<a hidden class="anchor" aria-hidden="true" href="#推理">#</a></h5>
+<ul>
+<li>高分辨率长视频的推理往往难以在单张GPU上完成，为了解决这个问题，论文提出了<strong>时空瓦片策略</strong>（spatial-temporal tiling strategy）（很形象的名字，视频首尾相连，类似于房顶的瓦片），将视频拆成有部分重叠的片段，对每个片段单独编解码，并使用线性组合处理重叠部分。</li>
+<li>直接在推理中使用瓦片策略会导致训练和推理中出现不一致的情况（重叠部分的处理导致的），为了解决这个问题，论文在训练之后引入了一个微调阶段，<strong>在微调阶段中随机决定是否采用瓦片策略</strong>，保证训练和推理的一致性。</li>
+<li>按照 T 维度（temporal）进行操作的代码如下：</li>
+</ul>
+<div class="highlight"><pre tabindex="0" class="chroma"><code class="language-python" data-lang="python"><span class="line"><span class="cl"><span class="k">def</span> <span class="nf">temporal_tiled_encode</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">x</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">FloatTensor</span><span class="p">,</span>  
+</span></span><span class="line"><span class="cl">                          <span class="n">return_dict</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">AutoencoderKLOutput</span><span class="p">:</span>  
+</span></span><span class="line"><span class="cl">  
+</span></span><span class="line"><span class="cl">    <span class="n">B</span><span class="p">,</span> <span class="n">C</span><span class="p">,</span> <span class="n">T</span><span class="p">,</span> <span class="n">H</span><span class="p">,</span> <span class="n">W</span> <span class="o">=</span> <span class="n">x</span><span class="o">.</span><span class="n">shape</span>  
+</span></span><span class="line"><span class="cl">    <span class="c1"># 减去重叠部分后的长度，用作步长  </span>
+</span></span><span class="line"><span class="cl">    <span class="n">overlap_size</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span>  
+</span></span><span class="line"><span class="cl">        <span class="bp">self</span><span class="o">.</span><span class="n">tile_sample_min_tsize</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_overlap_factor</span><span class="p">))</span>  
+</span></span><span class="line"><span class="cl">    <span class="c1"># 前后帧的重叠长度  </span>
+</span></span><span class="line"><span class="cl">    <span class="n">blend_extent</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span>  
+</span></span><span class="line"><span class="cl">        <span class="bp">self</span><span class="o">.</span><span class="n">tile_latent_min_tsize</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_overlap_factor</span><span class="p">)</span>  
+</span></span><span class="line"><span class="cl">    <span class="c1"># 最大长度  </span>
+</span></span><span class="line"><span class="cl">    <span class="n">t_limit</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_latent_min_tsize</span> <span class="o">-</span> <span class="n">blend_extent</span>  
+</span></span><span class="line"><span class="cl">  
+</span></span><span class="line"><span class="cl">    <span class="c1"># Split the video into tiles and encode them separately.  </span>
+</span></span><span class="line"><span class="cl">    <span class="n">row</span> <span class="o">=</span> <span class="p">[]</span>  
+</span></span><span class="line"><span class="cl">    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">T</span><span class="p">,</span> <span class="n">overlap_size</span><span class="p">):</span>  
+</span></span><span class="line"><span class="cl">        <span class="c1"># 每一个瓦片的长度为 tile_sample_min_tsize        tile = x[:, :, i: i + self.tile_sample_min_tsize + 1, :, :]  </span>
+</span></span><span class="line"><span class="cl">        <span class="c1"># 处理空间维度  </span>
+</span></span><span class="line"><span class="cl">        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">use_spatial_tiling</span> \  
+</span></span><span class="line"><span class="cl">                <span class="ow">and</span> <span class="p">(</span><span class="n">tile</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">&gt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_sample_min_size</span> \  
+</span></span><span class="line"><span class="cl">                     <span class="ow">or</span> <span class="n">tile</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="o">-</span><span class="mi">2</span><span class="p">]</span> <span class="o">&gt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">tile_sample_min_size</span><span class="p">):</span>  
+</span></span><span class="line"><span class="cl">            <span class="n">tile</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">spatial_tiled_encode</span><span class="p">(</span><span class="n">tile</span><span class="p">,</span> <span class="n">return_moments</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>  
+</span></span><span class="line"><span class="cl">        <span class="k">else</span><span class="p">:</span>
+</span></span><span class="line"><span class="cl">            <span class="n">tile</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">encoder</span><span class="p">(</span><span class="n">tile</span><span class="p">)</span>  
+</span></span><span class="line"><span class="cl">            <span class="n">tile</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">quant_conv</span><span class="p">(</span><span class="n">tile</span><span class="p">)</span>  
+</span></span><span class="line"><span class="cl">        <span class="k">if</span> <span class="n">i</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>  
+</span></span><span class="line"><span class="cl">            <span class="n">tile</span> <span class="o">=</span> <span class="n">tile</span><span class="p">[:,</span> <span class="p">:,</span> <span class="mi">1</span><span class="p">:,</span> <span class="p">:,</span> <span class="p">:]</span>  
+</span></span><span class="line"><span class="cl">        <span class="n">row</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">tile</span><span class="p">)</span>  
+</span></span><span class="line"><span class="cl">    <span class="n">result_row</span> <span class="o">=</span> <span class="p">[]</span>  
+</span></span><span class="line"><span class="cl">    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">tile</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">row</span><span class="p">):</span>  
+</span></span><span class="line"><span class="cl">        <span class="k">if</span> <span class="n">i</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>  
+</span></span><span class="line"><span class="cl">            <span class="c1"># 线性组合当前帧与前一帧的重叠部分  </span>
+</span></span><span class="line"><span class="cl">            <span class="n">tile</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">blend_t</span><span class="p">(</span><span class="n">row</span><span class="p">[</span><span class="n">i</span> <span class="o">-</span> <span class="mi">1</span><span class="p">],</span> <span class="n">tile</span><span class="p">,</span> <span class="n">blend_extent</span><span class="p">)</span>  
+</span></span><span class="line"><span class="cl">            <span class="n">result_row</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">tile</span><span class="p">[:,</span> <span class="p">:,</span> <span class="p">:</span><span class="n">t_limit</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:])</span>  
+</span></span><span class="line"><span class="cl">        <span class="k">else</span><span class="p">:</span>  
+</span></span><span class="line"><span class="cl">            <span class="c1"># 第一帧正常返回  </span>
+</span></span><span class="line"><span class="cl">            <span class="n">result_row</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">tile</span><span class="p">[:,</span> <span class="p">:,</span> <span class="p">:</span><span class="n">t_limit</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="p">:,</span> <span class="p">:])</span>  
+</span></span><span class="line"><span class="cl">  
+</span></span><span class="line"><span class="cl">    <span class="n">moments</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cat</span><span class="p">(</span><span class="n">result_row</span><span class="p">,</span> <span class="n">dim</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>  
+</span></span><span class="line"><span class="cl">    <span class="n">posterior</span> <span class="o">=</span> <span class="n">DiagonalGaussianDistribution</span><span class="p">(</span><span class="n">moments</span><span class="p">)</span>  
+</span></span><span class="line"><span class="cl">  
+</span></span><span class="line"><span class="cl">    <span class="k">if</span> <span class="ow">not</span> <span class="n">return_dict</span><span class="p">:</span>  
+</span></span><span class="line"><span class="cl">        <span class="k">return</span> <span class="p">(</span><span class="n">posterior</span><span class="p">,)</span>  
+</span></span><span class="line"><span class="cl">  
+</span></span><span class="line"><span class="cl">    <span class="k">return</span> <span class="n">AutoencoderKLOutput</span><span class="p">(</span><span class="n">latent_dist</span><span class="o">=</span><span class="n">posterior</span><span class="p">)</span>
+</span></span></code></pre></div><h4 id="trm-block">Trm Block<a hidden class="anchor" aria-hidden="true" href="#trm-block">#</a></h4>
+<ul>
+<li>Trm 使用 unified Full Attention 机制，不再将 spatial 和 temporal 分开计算。（像 CogVideoX 一样）</li>
+<li>Trm 结构如下：
+<img alt="image-3.png" loading="lazy" src="image-3.png"></li>
+<li>Trm 部分的超参数如下：
+<img alt="image-4.png" loading="lazy" src="image-4.png"></li>
+</ul>
+<h5 id="输入处理">输入处理<a hidden class="anchor" aria-hidden="true" href="#输入处理">#</a></h5>
+<ul>
+<li>对于视频，使用 <code>3DVAE</code> 转换成 Latents</li>
+<li>对于文本，首先使用 LLM（代码中使用的是Llama3）编码成 Embedding，捕获<strong>精细的语义信息</strong>，同时使用 CLIP 提取池化的文本表示，包含<strong>全局信息</strong>。</li>
+</ul>
+<h5 id="主要结构">主要结构<a hidden class="anchor" aria-hidden="true" href="#主要结构">#</a></h5>
+<ul>
+<li>主要结构采用了从 Dual-Stream DiT 到 Single-Stream DiT 的设计。（类似于 Flux）</li>
+<li>代码中实际上用的就是 <code>Flux.1</code> 中的 Double 和 Single 网络</li>
+</ul>
+<h5 id="位置编码">位置编码<a hidden class="anchor" aria-hidden="true" href="#位置编码">#</a></h5>
+<ul>
+<li>将 RoPE 扩展到了三维，具体来说是先分别计算 T、H、W 三个维度的旋转频率矩阵，之后将 C 划分成三部分 (dt, dh, dw)，将每一段乘以对应的频率，并将结果 concat，得到最终的 RoPE
+<ul>
+<li>如何划分的呢？</li>
+</ul>
+</li>
+</ul>
+<h4 id="text-encoder">Text Encoder<a hidden class="anchor" aria-hidden="true" href="#text-encoder">#</a></h4>
+<ul>
+<li>使用 MLLM 代替 CLIP/T5 作为文本编码器。
+<ul>
+<li>相比于 T5，MLLM 在特征空间有更好的图文对齐；</li>
+<li>相比于 CLIP，MLLM 在图片细节理解和复杂推理上更强；</li>
+<li>MLLM可以遵循 prompt 去编码文本，将注意力更多地放在关键信息上。</li>
+</ul>
+</li>
+<li>MLLM 基于因果注意，而 T5-XXL 则利用双向注意，<strong>双向注意可以为扩散模型提供更好的文本指导</strong>，因此使用 Refineer 增强 MLLM 输出的文本特征。
+<img alt="image-5.png" loading="lazy" src="image-5.png"></li>
+<li>CLIP 提供的全局信息同样非常重要。类似于Flux和SDv3，通过 scale/shift/gate 的方式将 CLIP 的全局信息添加到模型中。</li>
+</ul>
+<h4 id="scaling-law">Scaling Law<a hidden class="anchor" aria-hidden="true" href="#scaling-law">#</a></h4>
+<h4 id="模型预训练">模型预训练<a hidden class="anchor" aria-hidden="true" href="#模型预训练">#</a></h4>
+<h4 id="模型加速">模型加速<a hidden class="anchor" aria-hidden="true" href="#模型加速">#</a></h4>
+<h4 id="模型性能评估">模型性能评估<a hidden class="anchor" aria-hidden="true" href="#模型性能评估">#</a></h4>
+<h3 id="v2a-模型"><code>V2A</code> 模型<a hidden class="anchor" aria-hidden="true" href="#v2a-模型">#</a></h3>
+<h3 id="i2v-模型"><code>I2V</code> 模型<a hidden class="anchor" aria-hidden="true" href="#i2v-模型">#</a></h3>
+<h3 id="人像动画生成">人像动画生成<a hidden class="anchor" aria-hidden="true" href="#人像动画生成">#</a></h3>
+
+
+  </div>
+
+  <footer class="post-footer">
+    <ul class="post-tags">
+      <li><a href="http://localhost:1313/zh/tags/">🤔</a></li>
+    </ul>
+  </footer>
+</article>
+    </main>
+    
+<footer class="footer">
+        <span>&copy; 2025 <a href="http://localhost:1313/zh/">Zoybzo&#39;s Site</a></span> · 
+
+    <span>
+        Powered by
+        <a href="https://gohugo.io/" rel="noopener noreferrer" target="_blank">Hugo</a> &
+        <a href="https://github.com/adityatelange/hugo-PaperMod/" rel="noopener" target="_blank">PaperMod</a>
+    </span>
+</footer>
+<a href="#top" aria-label="go to top" title="Go to Top (Alt + G)" class="top-link" id="top-link" accesskey="g">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 6" fill="currentColor">
+        <path d="M12 6H0l6-6z" />
+    </svg>
+</a>
+
+<script>
+    let menu = document.getElementById('menu')
+    if (menu) {
+        menu.scrollLeft = localStorage.getItem("menu-scroll-position");
+        menu.onscroll = function () {
+            localStorage.setItem("menu-scroll-position", menu.scrollLeft);
+        }
+    }
+
+    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+        anchor.addEventListener("click", function (e) {
+            e.preventDefault();
+            var id = this.getAttribute("href").substr(1);
+            if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+                document.querySelector(`[id='${decodeURIComponent(id)}']`).scrollIntoView({
+                    behavior: "smooth"
+                });
+            } else {
+                document.querySelector(`[id='${decodeURIComponent(id)}']`).scrollIntoView();
+            }
+            if (id === "top") {
+                history.replaceState(null, null, " ");
+            } else {
+                history.pushState(null, null, `#${id}`);
+            }
+        });
+    });
+
+</script>
+<script>
+    var mybutton = document.getElementById("top-link");
+    window.onscroll = function () {
+        if (document.body.scrollTop > 800 || document.documentElement.scrollTop > 800) {
+            mybutton.style.visibility = "visible";
+            mybutton.style.opacity = "1";
+        } else {
+            mybutton.style.visibility = "hidden";
+            mybutton.style.opacity = "0";
+        }
+    };
+
+</script>
+<script>
+    document.getElementById("theme-toggle").addEventListener("click", () => {
+        if (document.body.className.includes("dark")) {
+            document.body.classList.remove('dark');
+            localStorage.setItem("pref-theme", 'light');
+        } else {
+            document.body.classList.add('dark');
+            localStorage.setItem("pref-theme", 'dark');
+        }
+    })
+
+</script>
+</body>
+
+</html>

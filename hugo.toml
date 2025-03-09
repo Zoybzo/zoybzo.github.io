@@ -1,4 +1,73 @@
 baseURL = 'https://zoybzo.github.io/'
-languageCode = 'en-us'
+# languageCode = 'en-us'
+languageCode = 'zh-cn'
 title = "Zoybzo's Site"
 theme = "papermod"
+pagination.pagerSize = 10
+
+enableInlineShortcodes = true
+enableEmoji = true
+enableRobotsTXT = true
+buildDrafts = false
+buildFuture = false
+buildExpired = false
+pygmentsUseClasses = true
+
+defaultContentLanguage = 'zh' # 最顶部首先展示的语言页面
+# defaultContentLanguageInSubdir = true
+
+[minify]
+disableXML = true
+
+[languages.zh]
+languageName = "Chinese"
+weight = 1
+
+  [languages.zh.taxonomies]
+  category = "Category"
+  tag = "Label"
+  series = "Series"
+
+[[languages.zh.menu.main]]
+name = "Archive"
+url = "archives"
+weight = 5
+
+[[languages.zh.menu.main]]
+name = "Search"
+url = "search"
+weight = 10
+
+[[languages.zh.menu.main]]
+name = "Tags"
+url = "tags"
+weight = 10
+
+[outputs]
+home = [ "HTML", "RSS", "JSON" ]
+
+[params]
+env = "production"
+defaultTheme = "auto"
+ShowCodeCopyButtons = true
+ShowWordCounts = true
+VisitCount = true
+ShowAllPagesInArchive = true
+DateFormat = "2006-01-02"
+ShowPostNavLinks = true
+ShowPageNums = true
+ShowLastMod = true
+ShowToc = true
+TocOpen = true
+comments = true
+mainSections = [ "papers", "posts" ]
+
+  [params.homeInfoParams]
+  Title = "Hi! 👋"
+  Content = """
+  你好，这是 Zoybzo 的个人博客，我会在这里记录一些技术相关的内容，希望对你有用！
+  """
+
+  [[params.socialIcons]]
+  name = "github"
+  url = "https://github.com/zoybzo"
