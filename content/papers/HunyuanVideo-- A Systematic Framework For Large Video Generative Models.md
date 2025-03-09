@@ -15,7 +15,7 @@ dir: papers
 - HunyuanVideo 是一款开源的视频生成基座模型，打破了目前的开源模型远远弱于闭源模型的情形。
 - Hunyuan 在论文中提出了多种模型，包括文生视频、视频生音频、图生视频，以及姿态控制、音频控制、表情控制等多种下游微调任务。
 - 完整的 pipeline 如下所示： 
-![656x250](Pasted%20image%2020250307161744.png)
+{{< figure src="/images/Pasted image 20250307161744.png"  width="656" height="250">}}
 - 在 Pipeline 中主要包含三个部分：数据处理、基座模型训练以及下游任务。
 ## Detail
 ### `T2V` 模型
