@@ -11,7 +11,6 @@ series: 视频生成
 cover.image: 
 dir: papers
 ---
-# Paper
 ## Overview
 - HunyuanVideo 是一款开源的视频生成基座模型，打破了目前的开源模型远远弱于闭源模型的情形。
 - Hunyuan 在论文中提出了多种模型，包括文生视频、视频生音频、图生视频，以及姿态控制、音频控制、表情控制等多种下游微调任务。
